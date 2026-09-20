@@ -29,7 +29,7 @@
 import { ref, watch, onMounted, onUnmounted } from 'vue'
 import * as echarts from 'echarts'
 import { useTradingStore } from '../store/trading'
-const store = useTradingStore(); const eqChart = ref<HTMLDivElement>(); let inst: echarts.ECharts|null=null
+const store = useTradingStore(); const eqChart = ref<HTMLDivElement>(); let inst: echarts.ECharts | null = null
 
 function updateEq() {
   if (!inst||!store.gridResult) return
@@ -44,6 +44,7 @@ function updateEq() {
   })
 }
 watch(()=>store.gridResult,(r)=>{if(r) setTimeout(updateEq,50)})
+onMounted(()=>{if(eqChart.value){inst=echarts.init(eqChart.value);updateEq()}})
 onUnmounted(()=>inst?.dispose())
 </script>
 

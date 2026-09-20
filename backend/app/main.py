@@ -3,14 +3,27 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from .config import settings
 
 app = FastAPI(title="Grid Trading Engine")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# CORS 来源由环境配置提供;未配置时不静默放行任意来源,避免线上裸奔
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 ACTIVE_CLIENTS = []
 SIM_RUNNING = True
 current_price = 100.0
 ticks_history = []
+
+# 行情线程在 startup 中拿到主事件循环后再推送,避免在子线程里
+# asyncio.get_event_loop() 抛错被静默吞掉导致永远收不到行情
+main_loop = None
+
 
 class GridConfig(BaseModel):
     lowerPrice: float = 95
@@ -18,6 +31,11 @@ class GridConfig(BaseModel):
     gridCount: int = 20
     capitalPerGrid: float = 1000
     initialCapital: float = 100000
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "wsClients": len(ACTIVE_CLIENTS)}
 
 
 def simulate_market():
@@ -45,14 +63,23 @@ def simulate_market():
         order_book = {"bids": bids, "asks": asks, "midPrice": price, "spread": round(asks[0][0] - bids[0][0], 2)}
 
         payload = json.dumps({"ticks": ticks_history[-60:], "orderBook": order_book})
-        for ws in ACTIVE_CLIENTS:
-            try: asyncio.run_coroutine_threadsafe(ws.send_text(payload), asyncio.get_event_loop())
-            except: pass
+        if main_loop is not None and main_loop.is_running():
+            dead = []
+            for ws in ACTIVE_CLIENTS:
+                if ws.client_state.name != "CONNECTED":
+                    dead.append(ws)
+                    continue
+                asyncio.run_coroutine_threadsafe(ws.send_text(payload), main_loop)
+            for ws in dead:
+                if ws in ACTIVE_CLIENTS:
+                    ACTIVE_CLIENTS.remove(ws)
         time.sleep(0.5)
 
 
 @app.on_event("startup")
 async def startup():
+    global main_loop
+    main_loop = asyncio.get_running_loop()
     threading.Thread(target=simulate_market, daemon=True).start()
 
 
@@ -61,8 +88,9 @@ def run_backtest(config: GridConfig):
     step = (config.upperPrice - config.lowerPrice) / config.gridCount
     grid_prices = [config.lowerPrice + i * step for i in range(config.gridCount + 1)]
 
-    # Simulate prices
+    # Simulate prices —— numpy 与标准库随机数都固定种子,保证回测结果可复现
     np.random.seed(42)
+    random.seed(42)
     prices = [100]
     for _ in range(200):
         prices.append(prices[-1] + random.gauss(0, 1.2))
@@ -106,7 +134,8 @@ def run_backtest(config: GridConfig):
     return_rate = (total_profit / config.initialCapital) * 100
 
     # Sharpe ratio
-    eq_returns = np.diff(equity_curve) / np.array(equity_curve[:-1] + 1e-5)
+    eq = np.array(equity_curve, dtype=float)
+    eq_returns = np.diff(eq) / (eq[:-1] + 1e-5)
     sharpe = float(np.mean(eq_returns) / max(np.std(eq_returns), 1e-5) * np.sqrt(252)) if len(eq_returns) > 1 else 0
 
     # Max drawdown
@@ -138,6 +167,12 @@ async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     ACTIVE_CLIENTS.append(ws)
     try:
-        while True: await ws.receive_text()
-    except: 
-        if ws in ACTIVE_CLIENTS: ACTIVE_CLIENTS.remove(ws)
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        if ws in ACTIVE_CLIENTS:
+            ACTIVE_CLIENTS.remove(ws)
