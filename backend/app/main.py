@@ -4,11 +4,14 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from . import config
+
 app = FastAPI(title="Grid Trading Engine")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=config.CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
 
 ACTIVE_CLIENTS = []
 SIM_RUNNING = True
+MAIN_LOOP = None  # startup 时捕获的主事件循环，供行情线程回投协程
 current_price = 100.0
 ticks_history = []
 
@@ -46,13 +49,15 @@ def simulate_market():
 
         payload = json.dumps({"ticks": ticks_history[-60:], "orderBook": order_book})
         for ws in ACTIVE_CLIENTS:
-            try: asyncio.run_coroutine_threadsafe(ws.send_text(payload), asyncio.get_event_loop())
-            except: pass
+            try: asyncio.run_coroutine_threadsafe(ws.send_text(payload), MAIN_LOOP)
+            except Exception: pass
         time.sleep(0.5)
 
 
 @app.on_event("startup")
 async def startup():
+    global MAIN_LOOP
+    MAIN_LOOP = asyncio.get_running_loop()
     threading.Thread(target=simulate_market, daemon=True).start()
 
 
@@ -106,7 +111,7 @@ def run_backtest(config: GridConfig):
     return_rate = (total_profit / config.initialCapital) * 100
 
     # Sharpe ratio
-    eq_returns = np.diff(equity_curve) / np.array(equity_curve[:-1] + 1e-5)
+    eq_returns = np.diff(equity_curve) / (np.array(equity_curve[:-1]) + 1e-5)
     sharpe = float(np.mean(eq_returns) / max(np.std(eq_returns), 1e-5) * np.sqrt(252)) if len(eq_returns) > 1 else 0
 
     # Max drawdown

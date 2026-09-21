@@ -2,6 +2,13 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import axios from 'axios'
 import type { Tick, OrderBook, GridConfig, GridResult } from '@/types'
+
+// 接口地址统一走环境配置：默认经 Vite 代理访问后端，也可用 VITE_API_BASE_URL / VITE_WS_URL 直连
+const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
+const WS_URL =
+  import.meta.env.VITE_WS_URL ||
+  `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
+
 export const useTradingStore = defineStore('trading', () => {
   const loading = ref(false)
   const ticks = ref<Tick[]>([])
@@ -12,7 +19,7 @@ export const useTradingStore = defineStore('trading', () => {
 
   let ws: WebSocket | null = null
   function connectWS() {
-    ws = new WebSocket(`ws://${location.hostname}:8000/ws`)
+    ws = new WebSocket(WS_URL)
     ws.onopen = () => { wsConnected.value = true }
     ws.onmessage = (e) => {
       try {
@@ -26,7 +33,7 @@ export const useTradingStore = defineStore('trading', () => {
 
   async function runBacktest() {
     loading.value = true
-    try { const { data } = await axios.post('/api/backtest', config.value) ; gridResult.value = data }
+    try { const { data } = await axios.post(`${API_BASE}/api/backtest`, config.value) ; gridResult.value = data }
     finally { loading.value = false }
   }
 
